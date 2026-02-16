@@ -1,25 +1,18 @@
 {
   "videos": [
     {
-      "id": "dQw4w9WgXcQ",
       "title": "Video 1",
       "creator": "creatorA",
       "tags": ["acki", "news"],
-      "enabled": true
+      "enabled": true,
+      "source": { "type": "youtube", "id": "dQw4w9WgXcQ" }
     },
     {
-      "id": "M7lc1UVf-VE",
       "title": "Video 2",
       "creator": "creatorB",
       "tags": ["tutorial"],
-      "enabled": true
-    },
-    {
-      "id": "ysz5S6PUM-U",
-      "title": "Video 3",
-      "creator": "creatorA",
-      "tags": ["community"],
-      "enabled": true
+      "enabled": true,
+      "source": { "type": "youtube", "id": "M7lc1UVf-VE" }
     }
   ]
 }
