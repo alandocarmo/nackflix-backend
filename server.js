@@ -1,95 +1,202 @@
-import express from "express";
-import cors from "cors";
-import morgan from "morgan";
-import { nanoid } from "nanoid";
-import fs from "fs";
-import path from "path";
+const express = require("express");
+const cors = require("cors");
+const { nanoid } = require("nanoid");
+const { PutObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+
+const { getR2Client } = require("./r2");
+const { getCreators, saveCreators, getVideos, saveVideos } = require("./dataStore");
 
 const app = express();
-app.use(express.json());
-app.use(morgan("tiny"));
-
-const PORT = process.env.PORT || 8080;
-const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
+app.use(express.json({ limit: "5mb" }));
 
 app.use(
   cors({
-    origin: CORS_ORIGIN === "*" ? true : CORS_ORIGIN,
-    credentials: true
+    origin: process.env.CORS_ORIGIN,
+    credentials: true,
   })
 );
 
-const dataPath = path.join(process.cwd(), "data", "videos.json");
+app.get("/health", (req, res) => {
+  res.json({ ok: true });
+});
 
-function loadVideos() {
-  const raw = fs.readFileSync(dataPath, "utf-8");
-  const json = JSON.parse(raw);
-  return json.videos?.filter((v) => v.enabled) ?? [];
-}
+/* =========================
+   CREATORS
+========================= */
 
-// Sessões em memória (MVP)
-const sessions = new Map(); // sessionId -> { tgUserId, startedAt, lastPingAt, proofs, videoCount }
-const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2h
+app.post("/creators", (req, res) => {
+  const { handle, name, bio = "", avatarUrl = "" } = req.body || {};
 
-function cleanupSessions() {
-  const now = Date.now();
-  for (const [sid, s] of sessions.entries()) {
-    if (now - s.lastPingAt > SESSION_TTL_MS) sessions.delete(sid);
+  if (!handle || !name) {
+    return res.status(400).json({ error: "handle_and_name_required" });
   }
-}
-setInterval(cleanupSessions, 60_000);
 
-// Healthcheck
-app.get("/health", (req, res) => res.json({ ok: true }));
+  const creators = getCreators();
+  const exists = creators.find(
+    (c) => c.handle.toLowerCase() === handle.toLowerCase()
+  );
 
-// Feed simples (filtros opcionais)
+  if (exists) {
+    return res.status(409).json({ error: "creator_already_exists" });
+  }
+
+  const creator = {
+    id: nanoid(10),
+    handle,
+    name,
+    bio,
+    avatarUrl,
+    createdAt: new Date().toISOString(),
+  };
+
+  creators.push(creator);
+  saveCreators(creators);
+
+  res.json({ creator });
+});
+
+app.get("/creators", (req, res) => {
+  res.json({ creators: getCreators() });
+});
+
+app.get("/creators/:handle", (req, res) => {
+  const handle = String(req.params.handle).toLowerCase();
+  const creators = getCreators();
+  const creator = creators.find(
+    (c) => c.handle.toLowerCase() === handle
+  );
+
+  if (!creator) {
+    return res.status(404).json({ error: "creator_not_found" });
+  }
+
+  const videos = getVideos().filter(
+    (v) => String(v.creatorHandle || "").toLowerCase() === handle
+  );
+
+  res.json({ creator, videos });
+});
+
+/* =========================
+   UPLOAD SIGN
+========================= */
+
+app.post("/uploads/sign", async (req, res) => {
+  try {
+    const { creatorHandle, filename, contentType } = req.body || {};
+
+    if (!creatorHandle || !filename || !contentType) {
+      return res.status(400).json({
+        error: "creatorHandle_filename_contentType_required",
+      });
+    }
+
+    const creators = getCreators();
+    const creator = creators.find(
+      (c) => c.handle.toLowerCase() === creatorHandle.toLowerCase()
+    );
+
+    if (!creator) {
+      return res.status(404).json({ error: "creator_not_found" });
+    }
+
+    const ext = filename.includes(".") ? filename.split(".").pop() : "mp4";
+    const safeExt =
+      String(ext).toLowerCase().replace(/[^a-z0-9]/g, "") || "mp4";
+
+    const key = `creators/${creator.handle}/${Date.now()}-${nanoid(6)}.${safeExt}`;
+
+    const Bucket = process.env.R2_BUCKET;
+    const r2 = getR2Client();
+
+    const cmd = new PutObjectCommand({
+      Bucket,
+      Key: key,
+      ContentType: contentType,
+      CacheControl: "public, max-age=31536000, immutable",
+    });
+
+    const uploadUrl = await getSignedUrl(r2, cmd, { expiresIn: 60 * 10 });
+
+    const publicBase = process.env.R2_PUBLIC_BASE_URL.replace(/\/+$/, "");
+    const publicUrl = `${publicBase}/${key}`;
+
+    res.json({ uploadUrl, publicUrl, key });
+  } catch (err) {
+    console.error("sign_failed", err);
+    res.status(500).json({ error: "sign_failed" });
+  }
+});
+
+/* =========================
+   VIDEOS
+========================= */
+
+app.post("/videos", (req, res) => {
+  const {
+    creatorHandle,
+    title,
+    tags = [],
+    url,
+    durationSec = null,
+  } = req.body || {};
+
+  if (!creatorHandle || !title || !url) {
+    return res.status(400).json({
+      error: "creatorHandle_title_url_required",
+    });
+  }
+
+  const creators = getCreators();
+  const creator = creators.find(
+    (c) => c.handle.toLowerCase() === creatorHandle.toLowerCase()
+  );
+
+  if (!creator) {
+    return res.status(404).json({ error: "creator_not_found" });
+  }
+
+  const videos = getVideos();
+
+  const video = {
+    id: nanoid(10),
+    title,
+    creatorHandle: creator.handle,
+    tags: Array.isArray(tags) ? tags : [],
+    source: {
+      type: "mp4",
+      url,
+    },
+    durationSec,
+    enabled: true,
+    createdAt: new Date().toISOString(),
+  };
+
+  videos.unshift(video);
+  saveVideos(videos);
+
+  res.json({ video });
+});
+
 app.get("/feed", (req, res) => {
-  const { creator, tag, limit } = req.query;
-  let vids = loadVideos();
+  const limit = Math.max(1, Math.min(50, parseInt(req.query.limit || "20", 10)));
+  const creator = req.query.creator
+    ? String(req.query.creator).toLowerCase()
+    : null;
 
-  if (creator) vids = vids.filter((v) => v.creator === creator);
-  if (tag) vids = vids.filter((v) => (v.tags || []).includes(tag));
+  let videos = getVideos().filter((v) => v.enabled);
 
-  const lim = Math.min(parseInt(limit || "20", 10), 50);
-  vids = vids.slice(0, lim);
-
-  res.json({ videos: vids });
-});
-
-// Iniciar sessão (MVP: sem verificação criptográfica do Telegram ainda)
-app.post("/session/start", (req, res) => {
-  const { tgUserId } = req.body || {};
-  const sessionId = nanoid(16);
-
-  sessions.set(sessionId, {
-    tgUserId: tgUserId || null,
-    startedAt: Date.now(),
-    lastPingAt: Date.now(),
-    proofs: 0,
-    videoCount: 0
-  });
-
-  res.json({ sessionId });
-});
-
-// Ping de sessão (métrica + anti-replay lógico)
-app.post("/session/ping", (req, res) => {
-  const { sessionId, event, proofsDelta, videoDelta } = req.body || {};
-  if (!sessionId || !sessions.has(sessionId)) {
-    return res.status(400).json({ error: "invalid_session" });
+  if (creator) {
+    videos = videos.filter(
+      (v) => String(v.creatorHandle || "").toLowerCase() === creator
+    );
   }
 
-  const s = sessions.get(sessionId);
-  s.lastPingAt = Date.now();
-
-  if (typeof proofsDelta === "number" && proofsDelta > 0) s.proofs += proofsDelta;
-  if (typeof videoDelta === "number" && videoDelta > 0) s.videoCount += videoDelta;
-
-  // opcional: registrar eventos para auditoria / logs
-  // event pode ser: "proof_ok", "video_end", etc.
-  res.json({ ok: true, session: { proofs: s.proofs, videoCount: s.videoCount } });
+  res.json({ videos: videos.slice(0, limit) });
 });
 
-app.listen(PORT, () => {
-  console.log(`NackFlix backend running on :${PORT}`);
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log("NackFlix backend running on port", port);
 });

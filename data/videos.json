@@ -1,18 +1,3 @@
 {
-  "videos": [
-    {
-      "title": "Video 1",
-      "creator": "creatorA",
-      "tags": ["acki", "news"],
-      "enabled": true,
-      "source": { "type": "youtube", "id": "dQw4w9WgXcQ" }
-    },
-    {
-      "title": "Video 2",
-      "creator": "creatorB",
-      "tags": ["tutorial"],
-      "enabled": true,
-      "source": { "type": "youtube", "id": "M7lc1UVf-VE" }
-    }
-  ]
+  "videos": []
 }
