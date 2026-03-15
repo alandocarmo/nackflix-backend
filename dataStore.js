@@ -3,6 +3,7 @@ const path = require("path");
 
 const creatorsPath = path.join(__dirname, "data", "creators.json");
 const videosPath = path.join(__dirname, "data", "videos.json");
+const adsPath = path.join(__dirname, "data", "ads.json");
 
 function readJson(filePath, fallback) {
   try {
@@ -34,9 +35,19 @@ function saveVideos(videos) {
   writeJson(videosPath, { videos });
 }
 
+function getAds() {
+  return readJson(adsPath, { ads: [] }).ads;
+}
+
+function saveAds(ads) {
+  writeJson(adsPath, { ads });
+}
+
 module.exports = {
   getCreators,
   saveCreators,
   getVideos,
   saveVideos,
+  getAds,
+  saveAds,
 };

@@ -5,7 +5,14 @@ const { PutObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
 const { getR2Client } = require("./r2");
-const { getCreators, saveCreators, getVideos, saveVideos } = require("./dataStore");
+const {
+  getCreators,
+  saveCreators,
+  getVideos,
+  saveVideos,
+  getAds,
+  saveAds,
+} = require("./dataStore");
 
 const app = express();
 app.use(express.json({ limit: "5mb" }));
@@ -17,8 +24,67 @@ app.use(
   })
 );
 
+/* =========================
+   HEALTH
+========================= */
+
 app.get("/health", (req, res) => {
   res.json({ ok: true });
+});
+
+/* =========================
+   SESSIONS
+========================= */
+
+const sessions = new Map();
+
+app.post("/session/start", (req, res) => {
+  const { tgUserId = null } = req.body || {};
+  const sessionId = nanoid(16);
+
+  sessions.set(sessionId, {
+    sessionId,
+    tgUserId,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    events: [],
+    taps: 0,
+    videosCompleted: 0,
+  });
+
+  res.json({ sessionId });
+});
+
+app.post("/session/ping", (req, res) => {
+  const payload = req.body || {};
+  const { sessionId, event = "unknown", proofsDelta = 0, videoDelta = 0, count = 0 } = payload;
+
+  if (!sessionId || !sessions.has(sessionId)) {
+    return res.status(400).json({ error: "invalid_session" });
+  }
+
+  const session = sessions.get(sessionId);
+
+  session.updatedAt = new Date().toISOString();
+  session.events.push({
+    at: new Date().toISOString(),
+    ...payload,
+  });
+
+  session.taps += Number(proofsDelta || 0) + Number(count || 0);
+  session.videosCompleted += Number(videoDelta || 0);
+
+  sessions.set(sessionId, session);
+
+  res.json({
+    ok: true,
+    session: {
+      sessionId: session.sessionId,
+      taps: session.taps,
+      videosCompleted: session.videosCompleted,
+      updatedAt: session.updatedAt,
+    },
+  });
 });
 
 /* =========================
@@ -63,6 +129,7 @@ app.get("/creators", (req, res) => {
 app.get("/creators/:handle", (req, res) => {
   const handle = String(req.params.handle).toLowerCase();
   const creators = getCreators();
+
   const creator = creators.find(
     (c) => c.handle.toLowerCase() === handle
   );
@@ -185,7 +252,7 @@ app.get("/feed", (req, res) => {
     ? String(req.query.creator).toLowerCase()
     : null;
 
-  let videos = getVideos().filter((v) => v.enabled);
+  let videos = getVideos().filter((v) => v.enabled !== false);
 
   if (creator) {
     videos = videos.filter(
@@ -194,6 +261,85 @@ app.get("/feed", (req, res) => {
   }
 
   res.json({ videos: videos.slice(0, limit) });
+});
+
+/* =========================
+   ADS
+========================= */
+
+app.post("/ads", (req, res) => {
+  const {
+    advertiserName,
+    title,
+    subtitle = "",
+    adType,
+    mediaUrl,
+    ctaLabel = "Entrar em contato",
+    ctaUrl = "",
+    plan,
+    locations = ["global"],
+    startsAt = null,
+    endsAt = null,
+  } = req.body || {};
+
+  if (!advertiserName || !title || !adType || !mediaUrl || !plan) {
+    return res.status(400).json({ error: "missing_required_fields" });
+  }
+
+  if (!["video", "image"].includes(adType)) {
+    return res.status(400).json({ error: "invalid_ad_type" });
+  }
+
+  if (!["daily", "weekly", "monthly"].includes(plan)) {
+    return res.status(400).json({ error: "invalid_plan" });
+  }
+
+  const ads = getAds();
+
+  const ad = {
+    id: nanoid(10),
+    advertiserName,
+    title,
+    subtitle,
+    adType,
+    mediaUrl,
+    ctaLabel,
+    ctaUrl,
+    plan,
+    locations: Array.isArray(locations) ? locations : ["global"],
+    startsAt,
+    endsAt,
+    enabled: true,
+    createdAt: new Date().toISOString(),
+    lastShownAt: null,
+    impressions: 0,
+  };
+
+  ads.unshift(ad);
+  saveAds(ads);
+
+  res.json({ ad });
+});
+
+app.get("/ads", (req, res) => {
+  res.json({ ads: getAds() });
+});
+
+app.post("/ads/:id/shown", (req, res) => {
+  const { id } = req.params;
+  const ads = getAds();
+
+  const index = ads.findIndex((a) => a.id === id);
+  if (index === -1) {
+    return res.status(404).json({ error: "ad_not_found" });
+  }
+
+  ads[index].lastShownAt = new Date().toISOString();
+  ads[index].impressions = Number(ads[index].impressions || 0) + 1;
+
+  saveAds(ads);
+
+  res.json({ ok: true, ad: ads[index] });
 });
 
 const port = process.env.PORT || 3000;
