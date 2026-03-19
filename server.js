@@ -12,6 +12,10 @@ const {
   saveVideos,
   getAds,
   saveAds,
+  getUsers,
+  saveUsers,
+  getSubscriptions,
+  saveSubscriptions,
 } = require("./dataStore");
 
 const app = express();
@@ -24,10 +28,6 @@ app.use(
   })
 );
 
-/* =========================
-   HEALTH
-========================= */
-
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
@@ -39,12 +39,13 @@ app.get("/health", (req, res) => {
 const sessions = new Map();
 
 app.post("/session/start", (req, res) => {
-  const { tgUserId = null } = req.body || {};
+  const { tgUserId = null, userId = null } = req.body || {};
   const sessionId = nanoid(16);
 
   sessions.set(sessionId, {
     sessionId,
     tgUserId,
+    userId,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     events: [],
@@ -57,7 +58,13 @@ app.post("/session/start", (req, res) => {
 
 app.post("/session/ping", (req, res) => {
   const payload = req.body || {};
-  const { sessionId, event = "unknown", proofsDelta = 0, videoDelta = 0, count = 0 } = payload;
+  const {
+    sessionId,
+    event = "unknown",
+    proofsDelta = 0,
+    videoDelta = 0,
+    count = 0,
+  } = payload;
 
   if (!sessionId || !sessions.has(sessionId)) {
     return res.status(400).json({ error: "invalid_session" });
@@ -85,6 +92,140 @@ app.post("/session/ping", (req, res) => {
       updatedAt: session.updatedAt,
     },
   });
+});
+
+/* =========================
+   AUTH / USERS
+========================= */
+
+app.post("/auth/register", (req, res) => {
+  const {
+    fullName,
+    email,
+    password,
+    phone = "",
+    bio = "",
+    avatarUrl = "",
+    location = "global",
+    wantsToBeCreator = false,
+  } = req.body || {};
+
+  if (!fullName || !email || !password) {
+    return res.status(400).json({ error: "missing_required_fields" });
+  }
+
+  const users = getUsers();
+  const exists = users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+
+  if (exists) {
+    return res.status(409).json({ error: "user_already_exists" });
+  }
+
+  const user = {
+    id: nanoid(10),
+    fullName,
+    email,
+    password, // MVP: plain text. depois trocar por hash.
+    phone,
+    bio,
+    avatarUrl,
+    location,
+    wantsToBeCreator,
+    adFreeActive: false,
+    createdAt: new Date().toISOString(),
+  };
+
+  users.push(user);
+  saveUsers(users);
+
+  res.json({ user });
+});
+
+app.post("/auth/login", (req, res) => {
+  const { email, password } = req.body || {};
+  const users = getUsers();
+
+  const user = users.find(
+    (u) => u.email.toLowerCase() === String(email).toLowerCase() && u.password === password
+  );
+
+  if (!user) {
+    return res.status(401).json({ error: "invalid_credentials" });
+  }
+
+  res.json({ user });
+});
+
+app.get("/users/:id", (req, res) => {
+  const users = getUsers();
+  const user = users.find((u) => u.id === req.params.id);
+
+  if (!user) {
+    return res.status(404).json({ error: "user_not_found" });
+  }
+
+  res.json({ user });
+});
+
+app.put("/users/:id", (req, res) => {
+  const users = getUsers();
+  const index = users.findIndex((u) => u.id === req.params.id);
+
+  if (index === -1) {
+    return res.status(404).json({ error: "user_not_found" });
+  }
+
+  users[index] = {
+    ...users[index],
+    ...req.body,
+    id: users[index].id,
+    email: req.body.email || users[index].email,
+  };
+
+  saveUsers(users);
+  res.json({ user: users[index] });
+});
+
+/* =========================
+   SUBSCRIPTIONS
+========================= */
+
+app.post("/subscriptions/buy", (req, res) => {
+  const { userId, planCode } = req.body || {};
+
+  if (!userId || !planCode) {
+    return res.status(400).json({ error: "missing_required_fields" });
+  }
+
+  if (planCode !== "ad_free_10usd") {
+    return res.status(400).json({ error: "invalid_plan_code" });
+  }
+
+  const users = getUsers();
+  const userIndex = users.findIndex((u) => u.id === userId);
+
+  if (userIndex === -1) {
+    return res.status(404).json({ error: "user_not_found" });
+  }
+
+  const subscriptions = getSubscriptions();
+
+  const subscription = {
+    id: nanoid(10),
+    userId,
+    planCode,
+    amountUsd: 10,
+    status: "active",
+    createdAt: new Date().toISOString(),
+  };
+
+  subscriptions.push(subscription);
+  saveSubscriptions(subscriptions);
+
+  users[userIndex].adFreeActive = true;
+  saveUsers(users);
+
+  res.json({ ok: true, subscription, user: users[userIndex] });
 });
 
 /* =========================
